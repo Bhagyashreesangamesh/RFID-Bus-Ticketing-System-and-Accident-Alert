@@ -1,0 +1,243 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Servo.h>
+#include <SoftwareSerial.h>
+// Define pins for RFID, buzzer, servos, GPS, GSM, motor driver, and controls
+#define SS_PIN 10
+#define RST_PIN 9
+#define BUZZER_PIN 8
+#define ENTRY_SERVO_PIN 6
+#define EXIT_SERVO_PIN 7
+#define GPS_RX 4 // GPS RX Pin
+#define GPS_TX 3 // GPS TX Pin
+#define GSM_RX 2 // GSM RX Pin
+#define GSM_TX 5 // GSM TX Pin
+#define ACCIDENT_SENSOR_PIN A0 // Pin for accident detection sensor
+// Motor Driver (L293D) pins
+#define MOTOR_EN_PIN 11 // Enable pin
+#define MOTOR_IN1_PIN 12 // Input 1
+#define MOTOR_IN2_PIN 13 // Input 2
+// Start/Stop Button and Limit Switch
+#define START_BUTTON_PIN 2
+#define STOP_BUTTON_PIN 3
+#define LIMIT_SWITCH_PIN 7
+// Define the total number of seats in the bus
+#define TOTAL_SEATS 30
+int availableSeats = TOTAL_SEATS;
+// Initialize RFID, LCD, GPS, GSM, and Servos
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+Servo entryServo;
+Servo exitServo;
+SoftwareSerial gpsSerial(GPS_RX, GPS_TX);
+SoftwareSerial gsmSerial(GSM_RX, GSM_TX);
+// Variables for RFID system
+long balance = 100; // Example starting balance
+int fare = 10; // Fixed fare amount
+bool boarded = false;
+// Variables for GPS and GSM
+String latitude = "";
+String longitude = "";
+bool busRunning = false;
+bool accidentDetected = false;
+void setup() {
+ // Initialize serial communication
+ Serial.begin(9600);
+ // Initialize RFID
+ SPI.begin();
+ mfrc522.PCD_Init();
+// Initialize LCD
+ lcd.init();
+ lcd.backlight();
+ // Initialize buzzer
+ pinMode(BUZZER_PIN, OUTPUT);
+// Initialize servos
+ entryServo.attach(ENTRY_SERVO_PIN);
+ exitServo.attach(EXIT_SERVO_PIN);
+ entryServo.write(0); // Entry gate closed
+ exitServo.write(0); // Exit gate closed
+ // Initialize GPS and GSM
+ gpsSerial.begin(9600); // GPS module
+ gsmSerial.begin(9600); // GSM module
+ // Accident sensor pin
+ pinMode(ACCIDENT_SENSOR_PIN, INPUT);
+ // Motor driver setup
+ pinMode(MOTOR_EN_PIN, OUTPUT);
+ pinMode(MOTOR_IN1_PIN, OUTPUT);
+pinMode(MOTOR_IN2_PIN, OUTPUT);
+// Start/Stop buttons and limit switch
+ pinMode(START_BUTTON_PIN, INPUT_PULLUP);
+ pinMode(STOP_BUTTON_PIN, INPUT_PULLUP);
+ pinMode(LIMIT_SWITCH_PIN, INPUT_PULLUP);
+ // Initial setup messages
+ lcd.clear();
+ lcd.setCursor(0, 0);
+lcd.print("Bus System Ready");
+ delay(2000);
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Seats: ");
+ lcd.print(availableSeats);
+ delay(2000);
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Press Start");
+}
+void loop() {
+ // Start the bus system
+ if (digitalRead(START_BUTTON_PIN) == LOW) {
+ busRunning = true;
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("System Started");
+ delay(1000);
+ }
+ // Stop the bus system
+ if (digitalRead(STOP_BUTTON_PIN) == LOW) {
+ busRunning = false;
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("System Stopped");
+ stopBus(); // Stop motor
+ delay(1000);
+ }
+ // Check limit switch
+ if (digitalRead(LIMIT_SWITCH_PIN) == LOW) {
+ busRunning = false;
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Limit Switch Hit");
+ stopBus(); // Stop motor
+ delay(1000);
+ }
+ // Check accident sensor
+ int accidentStatus = analogRead(ACCIDENT_SENSOR_PIN);
+ if (accidentStatus > 500 && !accidentDetected) { // Threshold for accident detection
+ accidentDetected = true;
+ busRunning = false;
+ handleAccident(); // Handle accident scenario
+ }
+ // Main bus system logic
+ if (busRunning && !accidentDetected) {
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Place your card");
+if (mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial()) {
+ handleRFID(); // RFID logic for boarding/alighting
+ }
+ }
+}
+// Function to handle RFID operations
+void handleRFID() {
+ // Get card UID
+ String cardID = "";
+ for (byte i = 0; i < mfrc522.uid.size; i++) {
+ cardID += String(mfrc522.uid.uidByte[i] < 0x10 ? "0" : "");
+ cardID += String(mfrc522.uid.uidByte[i], HEX);
+ }
+ cardID.toUpperCase();
+ Serial.println("Card UID: " + cardID);
+// Buzzer feedback
+ digitalWrite(BUZZER_PIN, HIGH);
+ delay(100);
+ digitalWrite(BUZZER_PIN, LOW);
+ if (!boarded) {
+ // Boarding process
+ if (availableSeats > 0) {
+ if (balance >= fare) {
+ balance -= fare;
+ availableSeats--;
+lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Boarded Bus");
+ lcd.setCursor(0, 1);
+ lcd.print("Bal: Rs ");
+ lcd.print(balance);
+ delay(3000);
+ // Open entry gate
+ entryServo.write(90);
+ delay(3000);
+ entryServo.write(0);
+ boarded = true;
+ moveBusForward(); // Start moving the bus
+ } else {
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Insufficient Bal");
+ delay(3000);
+ }
+ } else {
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Bus Full");
+ delay(3000);
+ }
+ } else {
+// Alighting process
+ availableSeats++;
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Fare: Rs ");
+ lcd.print(fare);
+ lcd.setCursor(0, 1);
+ lcd.print("Bal: Rs ");
+ lcd.print(balance);
+ delay(3000);
+ // Open exit gate
+ exitServo.write(90);
+ delay(3000);
+ exitServo.write(0);
+ boarded = false;
+ stopBus(); // Stop the bus
+ }
+}
+// Function to handle an accident
+void handleAccident() {
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Accident Detected");
+// Get GPS data
+ getGPSLocation();
+ // Send accident alert via GSM
+gsmSerial.println("AT+CMGF=1"); // Set SMS mode
+ delay(1000);
+ gsmSerial.println("AT+CMGS=\"+911234567890\""); // Replace with emergency number
+ delay(1000);
+ gsmSerial.print("Accident Alert! Location: ");
+ gsmSerial.print("Lat: ");
+ gsmSerial.print(latitude);
+ gsmSerial.print(", Lon: ");
+ gsmSerial.print(longitude);
+ gsmSerial.write(26); // Send SMS (CTRL+Z)
+Serial.println("Accident detected. SMS sent.");
+ delay(5000);
+}
+// Function to get GPS location
+void getGPSLocation() {
+ while (gpsSerial.available()) {
+ String data = gpsSerial.readStringUntil('\n');
+ if (data.indexOf("GPRMC") != -1) {
+ int latStart = data.indexOf(",") + 1;
+ latitude = data.substring(latStart, latStart + 10);
+ longitude = data.substring(latStart + 12, latStart + 22);
+ }
+ }
+}
+// Function to move the bus forward
+void moveBusForward() {
+digitalWrite(MOTOR_EN_PIN, HIGH);
+ digitalWrite(MOTOR_IN1_PIN, HIGH);
+ digitalWrite(MOTOR_IN2_PIN, LOW);
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Bus Moving...");
+}
+// Function to stop the bus
+void stopBus() {
+ digitalWrite(MOTOR_EN_PIN, LOW);
+ lcd.clear();
+ lcd.setCursor(0, 0);
+ lcd.print("Bus Stopped");
+}
